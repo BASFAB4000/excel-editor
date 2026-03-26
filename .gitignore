@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+test_move.py
+
+# Virtual environments
+.venv/
+venv/
+.excel-editor/
+env/
+
+# PyInstaller
+*.spec.bak
+dist/
+build/
+
+# Test / temporäre Dateien
+test*.xlsx
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

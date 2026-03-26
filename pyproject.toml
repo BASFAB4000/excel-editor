@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excel-editor"
+version = "0.1.0"
+description = "RISE Planungsexcel Editor – liest und bearbeitet Excel-Dateien mit Erhalt der Formatierung."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = [
+    "openpyxl>=3.1",
+    "pandas>=2.0",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+excel-editor = "excel_editor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
