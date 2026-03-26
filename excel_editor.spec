@@ -30,6 +30,7 @@ a = Analysis(
         "openpyxl.styles",
         "openpyxl.utils",
         "pydantic",
+        "pydantic_core",
         "pandas",
         "pandas.compat.numpy.function",
     ],
