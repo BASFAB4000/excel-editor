@@ -12,7 +12,8 @@ import os
 
 # SPECPATH ist eine PyInstaller-Variable: Verzeichnis der .spec-Datei
 src_dir = os.path.join(SPECPATH, "src")
-cli_script = os.path.join(SPECPATH, "src", "excel_editor", "cli.py")
+# cli_script = os.path.join(SPECPATH, "src", "excel_editor", "cli.py")
+cli_script = os.path.join(SPECPATH, "src", "excel_editor", "__main__.py")
 
 a = Analysis(
     [cli_script],
