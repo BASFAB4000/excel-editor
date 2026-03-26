@@ -74,6 +74,16 @@ Verschiebt Zeile `No=1010` direkt **nach** die Zeile mit `No=1026`.
 Das neue No wird automatisch als Mittelwert berechnet: `int((1026 + 1030) / 2) = 1028`.  
 Am Ende wird interaktiv gefragt ob gespeichert werden soll → `n` eingeben zum Verwerfen.
 
+
+
+### ⚠️ WICHTIG (Windows EXE)
+
+Die standalone EXE ist ein **Windows‑Programm**.
+Sie akzeptiert **keine Linux-/WSL‑Pfade** wie `/mnt/c/...`.
+
+✅ Richtig:
+C:\Users\Name\Pfad\Datei.xlsx
+
 ```bash
 excel-editor \
   --file "/mnt/c/users/KuhneFa/BASF/BASF & SAP Collaboration - Dokumente/BASF_intern/RISE/100_Migration/999_TEST - System Linie/COP_TEST_Migration.xlsx" \
