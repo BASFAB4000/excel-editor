@@ -74,29 +74,23 @@ class ExcelEditor:
 
         resolved = config.file_path.resolve()
 
-        # Prüfen ob die Datei bereits in einer laufenden Excel-Instanz offen ist
+        # xw.Book(path) findet eine bereits geöffnete Mappe in jeder laufenden
+        # Excel-Instanz automatisch, oder öffnet sie neu in einem sichtbaren
+        # Excel-Fenster. Sichtbar (visible=True) ist notwendig damit Excel
+        # OneDrive-/SharePoint-Dateien öffnen kann (Auth-Dialoge).
         try:
-            for app in xw.apps:
-                for book in app.books:
-                    try:
-                        if Path(book.fullname).resolve() == resolved:
-                            self._app = app
-                            self._workbook = book
-                            break
-                    except Exception:
-                        continue
-                if self._workbook is not None:
-                    break
-        except Exception:
-            pass
+            self._workbook = xw.Book(str(resolved))
+        except Exception as e:
+            raise RuntimeError(
+                f"Excel-Datei konnte nicht geöffnet werden: {resolved}\n"
+                f"Stelle sicher dass:\n"
+                f"  • Microsoft Excel installiert ist\n"
+                f"  • die Datei existiert und nicht gesperrt ist\n"
+                f"Details: {e}"
+            )
 
-        if self._workbook is None:
-            # Datei nicht offen → neue versteckte Excel-Instanz starten
-            self._app = xw.App(visible=False, add_book=False)
-            self._app.display_alerts = False
-            self._owns_app = True
-            self._workbook = self._app.books.open(str(resolved))
-
+        self._app = self._workbook.app
+        self._owns_app = False  # wir schließen die Mappe nie automatisch
         self._worksheet = self._get_worksheet()
 
     # ------------------------------------------------------------------
@@ -415,13 +409,9 @@ class ExcelEditor:
             return self.config.file_path
 
     def close(self) -> None:
-        """Schließt die Arbeitsmappe (nur wenn wir die Excel-Instanz selbst geöffnet haben)."""
-        if self._owns_app and self._app is not None:
-            try:
-                self._workbook.close(save_changes=False)
-                self._app.quit()
-            except Exception:
-                pass
+        """Schließt nichts automatisch – die Mappe bleibt in Excel offen
+        damit AutoSave weiterläuft."""
+        pass
 
     # Context Manager Support
     def __enter__(self):
