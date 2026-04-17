@@ -1,7 +1,7 @@
-# Minimale Abhängigkeiten – werden automatisch über setup.py installiert.
+# Minimale Abhängigkeiten – werden automatisch über pyproject.toml installiert.
 # Nach dem Clonen: pip install -e .
-# Oder: pip install -r requirements.txt && pip install -e .
-openpyxl>=3.1
-pandas>=2.0
+#
+# VORAUSSETZUNG: Windows + Microsoft Excel installiert (xlwings nutzt Excel COM)
+xlwings>=0.30
 pydantic>=2.0
 pyinstaller>=6.0

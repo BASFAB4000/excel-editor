@@ -10,8 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 dependencies = [
-    "openpyxl>=3.1",
-    "pandas>=2.0",
+    "xlwings>=0.30",
     "pydantic>=2.0",
 ]
 

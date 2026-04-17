@@ -191,17 +191,29 @@ def print_rows(editor: ExcelEditor, n: int) -> None:
 def _detect_header_row(editor: ExcelEditor, max_scan: int = 20) -> int:
     """
     Erkennt automatisch die Header-Zeile: erste Zeile mit >= 3 gefüllten Zellen
-    die überwiegend Strings enthält (keine Zahlen wie Datenwerte).
+    die überwiegend Strings enthält.
     Gibt 1 zurück wenn nichts gefunden wird.
     """
-    ws = editor._worksheet
-    for row in ws.iter_rows(min_row=1, max_row=max_scan):
-        values = [c.value for c in row if c.value is not None]
-        if len(values) >= 3:
-            # Prüfen ob es überwiegend Strings sind (Header-Merkmal)
-            string_count = sum(1 for v in values if isinstance(v, str))
-            if string_count >= len(values) * 0.6:
-                return row[0].row
+    try:
+        ws = editor._worksheet
+        last_col = ws.used_range.last_cell.column
+        actual_max = min(max_scan, ws.used_range.last_cell.row)
+        data = ws.range((1, 1), (actual_max, last_col)).value
+        if not data:
+            return 1
+        # xlwings gibt bei einer einzelnen Zeile eine flache Liste zurück
+        if not isinstance(data[0], list):
+            data = [data]
+        for row_idx, row_values in enumerate(data, start=1):
+            if not row_values:
+                continue
+            values = [v for v in row_values if v is not None]
+            if len(values) >= 3:
+                string_count = sum(1 for v in values if isinstance(v, str))
+                if string_count >= len(values) * 0.6:
+                    return row_idx
+    except Exception:
+        pass
     return 1
 
 

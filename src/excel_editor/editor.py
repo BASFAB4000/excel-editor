@@ -1,16 +1,18 @@
 """
-Kernlogik des Excel Editors.
-Lesen und Schreiben von Excel-Dateien mit Erhalt der Formatierung.
+Kernlogik des Excel Editors – xlwings-Backend.
+
+Verwendet xlwings (Windows COM) statt openpyxl, damit Excel (inkl. AutoSave /
+AutoSync für OneDrive- und SharePoint-Dateien) aktiv bleibt.
+
+Voraussetzung: Windows + Microsoft Excel installiert.
 """
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import openpyxl
-from openpyxl.styles import PatternFill
+import xlwings as xw
 
 from .models import CellInfo, ExcelReadConfig, RowData, SheetInfo
 
@@ -19,53 +21,27 @@ from .models import CellInfo, ExcelReadConfig, RowData, SheetInfo
 # Hilfsfunktionen (privat)
 # ---------------------------------------------------------------------------
 
-def _get_bg_color(cell) -> Optional[str]:
-    """Extrahiert die Hintergrundfarbe einer Zelle als Hex-String."""
-    fill: PatternFill = cell.fill
-    if fill and fill.fgColor:
-        color = fill.fgColor
-        if color.type == "rgb" and color.rgb != "00000000":
-            return color.rgb
-    return None
+def _col_to_letter(col: int) -> str:
+    """Wandelt 1-basierten Spaltenindex in Excel-Buchstabe um (A, B, …, AA, …)."""
+    result = ""
+    while col > 0:
+        col, remainder = divmod(col - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
 
 
-def _get_font_color(cell) -> Optional[str]:
-    """Extrahiert die Schriftfarbe einer Zelle."""
-    if cell.font and cell.font.color:
-        color = cell.font.color
-        if color.type == "rgb" and color.rgb != "FF000000":
-            return color.rgb
-    return None
-
-
-def _cell_to_model(cell) -> CellInfo:
+def _no_val_eq(cell_val: Any, search_val: Any) -> bool:
     """
-    Konvertiert eine openpyxl-Zelle in ein CellInfo-Modell.
-    MergedCell-Objekte (überlappende Zellen) werden als leere Zellen behandelt.
+    Vergleicht einen Zellwert mit einem Suchwert.
+    xlwings gibt Integer-Zellen manchmal als float zurück (z.B. 1010.0).
+    Wir versuchen numerischen Vergleich, Fallback ist String-Vergleich.
     """
-    from openpyxl.cell.cell import MergedCell
-    from openpyxl.utils import get_column_letter
-
-    col_letter = get_column_letter(cell.column)
-
-    if isinstance(cell, MergedCell):
-        # Zusammengeführte Zellen haben keinen eigenen Wert/Format
-        return CellInfo(
-            row=cell.row,
-            column=cell.column,
-            column_letter=col_letter,
-            value=None,
-        )
-
-    return CellInfo(
-        row=cell.row,
-        column=cell.column,
-        column_letter=col_letter,
-        value=cell.value,
-        bg_color=_get_bg_color(cell),
-        font_bold=cell.font.bold if cell.font else False,
-        font_color=_get_font_color(cell),
-    )
+    if cell_val is None:
+        return False
+    try:
+        return int(float(cell_val)) == int(float(search_val))
+    except (ValueError, TypeError):
+        return str(cell_val) == str(search_val)
 
 
 # ---------------------------------------------------------------------------
@@ -74,59 +50,96 @@ def _cell_to_model(cell) -> CellInfo:
 
 class ExcelEditor:
     """
-    Haupt-Editor-Klasse.
+    Haupt-Editor-Klasse (xlwings-Backend).
+
+    Operiert via Excel COM – AutoSave/AutoSync auf OneDrive- und SharePoint-
+    Dateien bleibt vollständig aktiv, da alle Änderungen durch Excel selbst
+    vorgenommen werden.
+
+    Wenn die Datei bereits in einer laufenden Excel-Instanz geöffnet ist,
+    wird diese Instanz verwendet. Andernfalls wird eine versteckte Excel-
+    Instanz gestartet.
 
     Verwendung:
-        editor = ExcelEditor(config)
-        sheet_info = editor.get_sheet_info()
-        rows = editor.get_rows()
-        editor.edit_cell(row=3, column=2, new_value="neuer Wert")
-        editor.save()
+        with ExcelEditor(config) as editor:
+            editor.move_row_after("1010", "1026")
+            editor.save()
     """
 
     def __init__(self, config: ExcelReadConfig) -> None:
         self.config = config
-        # data_only=False -> Formeln werden als Formeltext geladen und beim
-        # Speichern erhalten. Excel berechnet die Werte beim nächsten Öffnen.
-        self._workbook = openpyxl.load_workbook(
-            config.file_path, data_only=False
-        )
+        self._app: Optional[xw.App] = None
+        self._workbook: Optional[xw.Book] = None
+        self._owns_app: bool = False
+
+        resolved = config.file_path.resolve()
+
+        # Prüfen ob die Datei bereits in einer laufenden Excel-Instanz offen ist
+        try:
+            for app in xw.apps:
+                for book in app.books:
+                    try:
+                        if Path(book.fullname).resolve() == resolved:
+                            self._app = app
+                            self._workbook = book
+                            break
+                    except Exception:
+                        continue
+                if self._workbook is not None:
+                    break
+        except Exception:
+            pass
+
+        if self._workbook is None:
+            # Datei nicht offen → neue versteckte Excel-Instanz starten
+            self._app = xw.App(visible=False, add_book=False)
+            self._app.display_alerts = False
+            self._owns_app = True
+            self._workbook = self._app.books.open(str(resolved))
+
         self._worksheet = self._get_worksheet()
 
     # ------------------------------------------------------------------
     # Sheet-Zugriff
     # ------------------------------------------------------------------
 
-    def _get_worksheet(self):
+    def _get_worksheet(self) -> xw.Sheet:
         """Gibt das konfigurierte Worksheet zurück."""
         if self.config.sheet_name:
-            if self.config.sheet_name not in self._workbook.sheetnames:
-                available = self._workbook.sheetnames
+            names = [s.name for s in self._workbook.sheets]
+            if self.config.sheet_name not in names:
                 raise ValueError(
                     f"Sheet '{self.config.sheet_name}' nicht gefunden. "
-                    f"Verfügbar: {available}"
+                    f"Verfügbar: {names}"
                 )
-            return self._workbook[self.config.sheet_name]
-        return self._workbook.active
+            return self._workbook.sheets[self.config.sheet_name]
+        return self._workbook.sheets.active
 
     def get_sheet_names(self) -> List[str]:
         """Gibt alle Sheet-Namen zurück."""
-        return self._workbook.sheetnames
+        return [s.name for s in self._workbook.sheets]
 
     def get_sheet_info(self) -> SheetInfo:
         """Gibt Metadaten des aktuellen Sheets zurück."""
         ws = self._worksheet
         header_row = self.config.header_row
+        used = ws.used_range
+        max_col = used.last_cell.column
+        max_row = used.last_cell.row
+
+        # Header-Zeile als Range einlesen (ein COM-Aufruf)
+        header_vals = ws.range((header_row, 1), (header_row, max_col)).value
+        if not isinstance(header_vals, list):
+            header_vals = [header_vals]
+
         headers: Dict[int, str] = {}
-        for cell in ws[header_row]:
-            headers[cell.column] = (
-                str(cell.value) if cell.value is not None
-                else f"Spalte_{cell.column}"
-            )
+        for i, val in enumerate(header_vals, start=1):
+            headers[i] = str(val) if val is not None else f"Spalte_{i}"
+
         return SheetInfo(
-            name=ws.title,
-            max_row=ws.max_row,
-            max_column=ws.max_column,
+            name=ws.name,
+            max_row=max_row,
+            max_column=max_col,
             headers=headers,
             header_row=header_row,
         )
@@ -143,98 +156,101 @@ class ExcelEditor:
     ) -> List[RowData]:
         """
         Liest alle Zeilen nach der Header-Zeile aus.
+        Werte werden per Block-Read eingelesen (schnell, ein COM-Aufruf).
 
         Args:
-            min_row: Erste Zeile die gelesen wird (Standard: header_row + 1)
-            max_row: Letzte Zeile (Standard: None = bis Ende)
+            min_row: Erste Zeile (Standard: header_row + 1)
+            max_row: Letzte Zeile (Standard: bis Ende)
             skip_empty: Leere Zeilen überspringen
         """
         if min_row is None:
             min_row = self.config.header_row + 1
+
         ws = self._worksheet
+        used = ws.used_range
+        last_row = max_row or used.last_cell.row
+        last_col = used.last_cell.column
+
+        if min_row > last_row:
+            return []
+
+        # Werte komplett auf einmal lesen
+        data = ws.range((min_row, 1), (last_row, last_col)).value
+
+        # xlwings gibt bei einer einzelnen Zeile eine flache Liste zurück
+        if last_row == min_row or not isinstance(data[0], list):
+            data = [data] if data else []
+
         rows: List[RowData] = []
-
-        for row in ws.iter_rows(min_row=min_row, max_row=max_row):
-            cells = [_cell_to_model(cell) for cell in row]
-
-            if skip_empty and all(c.value is None for c in cells):
+        for row_offset, row_values in enumerate(data):
+            actual_row = min_row + row_offset
+            if row_values is None:
+                row_values = [None] * last_col
+            if not isinstance(row_values, list):
+                row_values = [row_values]
+            if skip_empty and all(v is None for v in row_values):
                 continue
 
-            rows.append(RowData(row_index=row[0].row, cells=cells))
+            cells = [
+                CellInfo(
+                    row=actual_row,
+                    column=col_idx,
+                    column_letter=_col_to_letter(col_idx),
+                    value=val,
+                )
+                for col_idx, val in enumerate(row_values, start=1)
+            ]
+            rows.append(RowData(row_index=actual_row, cells=cells))
 
         return rows
 
     def get_row(self, row_index: int) -> Optional[RowData]:
         """Gibt eine einzelne Zeile anhand des Index zurück."""
         ws = self._worksheet
-        row = ws[row_index]
-        cells = [_cell_to_model(cell) for cell in row]
-
-        if all(c.value is None for c in cells):
+        last_col = ws.used_range.last_cell.column
+        values = ws.range((row_index, 1), (row_index, last_col)).value
+        if not isinstance(values, list):
+            values = [values]
+        if all(v is None for v in values):
             return None
-
+        cells = [
+            CellInfo(
+                row=row_index,
+                column=col_idx,
+                column_letter=_col_to_letter(col_idx),
+                value=val,
+            )
+            for col_idx, val in enumerate(values, start=1)
+        ]
         return RowData(row_index=row_index, cells=cells)
 
     # ------------------------------------------------------------------
-    # Daten schreiben (Formatierung bleibt erhalten)
+    # Daten schreiben
     # ------------------------------------------------------------------
 
-    def edit_cell(
-        self,
-        row: int,
-        column: int,
-        new_value: Any,
-    ) -> None:
+    def edit_cell(self, row: int, column: int, new_value: Any) -> None:
         """
         Bearbeitet eine einzelne Zelle.
-        Formatierung (Farbe, Schrift, etc.) bleibt erhalten.
+        Da die Änderung über Excel COM erfolgt, bleibt die Formatierung
+        automatisch erhalten.
 
         Args:
             row: Zeilenindex (1-basiert)
             column: Spaltenindex (1-basiert)
             new_value: Neuer Wert der Zelle
         """
-        ws = self._worksheet
-        cell = ws.cell(row=row, column=column)
+        self._worksheet.range(row, column).value = new_value
 
-        # Formatierung sichern
-        old_font = copy.copy(cell.font)
-        old_fill = copy.copy(cell.fill)
-        old_border = copy.copy(cell.border)
-        old_alignment = copy.copy(cell.alignment)
-        old_number_format = cell.number_format
-
-        # Wert setzen
-        cell.value = new_value
-
-        # Formatierung wiederherstellen
-        cell.font = old_font
-        cell.fill = old_fill
-        cell.border = old_border
-        cell.alignment = old_alignment
-        cell.number_format = old_number_format
-
-    def edit_row(
-        self,
-        row_index: int,
-        updates: Dict[int, Any],
-    ) -> None:
+    def edit_row(self, row_index: int, updates: Dict[int, Any]) -> None:
         """
         Bearbeitet mehrere Zellen einer Zeile auf einmal.
 
         Args:
             row_index: Zeilenindex (1-basiert)
             updates: Dict mit {Spaltenindex: neuer_Wert}
-
-        Beispiel:
-            editor.edit_row(3, {2: "neuer Name", 5: "neuer Status"})
         """
-        for column_index, new_value in updates.items():  # type: ignore[assignment]
-            self.edit_cell(
-                row=row_index,
-                column=column_index,
-                new_value=new_value,
-            )
+        for col, val in updates.items():
+            self.edit_cell(row=row_index, column=col, new_value=val)
 
     # ------------------------------------------------------------------
     # Zeile verschieben
@@ -257,81 +273,37 @@ class ExcelEditor:
     def _find_row_by_no(self, no_value: Any) -> int:
         """
         Sucht den Zeilenindex der Zeile mit dem angegebenen 'No'-Wert.
-        Vergleicht als String damit z.B. 1000 == '1000'.
+        Liest die gesamte No-Spalte auf einmal (ein COM-Aufruf).
         Wirft ValueError wenn nicht gefunden.
         """
-        from openpyxl.cell.cell import MergedCell
-
         no_col = self._find_no_column()
         ws = self._worksheet
         min_row = self.config.header_row + 1
+        last_row = ws.used_range.last_cell.row
 
-        for row in ws.iter_rows(min_row=min_row):
-            cell = row[no_col - 1]  # iter_rows gibt 0-basierte Liste
-            if isinstance(cell, MergedCell):
-                continue
-            if cell.value is not None and str(cell.value) == str(no_value):
-                return row[0].row
+        col_values = ws.range((min_row, no_col), (last_row, no_col)).value
+        if not isinstance(col_values, list):
+            col_values = [col_values]
+
+        for row_offset, val in enumerate(col_values):
+            if _no_val_eq(val, no_value):
+                return min_row + row_offset
 
         raise ValueError(f"Zeile mit No='{no_value}' nicht gefunden.")
 
-    def _copy_row_data(self, row_index: int) -> List[Dict]:
-        """
-        Kopiert alle Zell-Daten (Wert + vollständiges Format) einer Zeile
-        in eine Liste von Dictionaries für späteres Einfügen.
-        """
-        from openpyxl.cell.cell import MergedCell
-
-        ws = self._worksheet
-        copied: List[Dict] = []
-
-        for col_idx in range(1, ws.max_column + 1):
-            cell = ws.cell(row=row_index, column=col_idx)
-            if isinstance(cell, MergedCell):
-                copied.append({"col": col_idx, "merged": True})
-                continue
-            copied.append({
-                "col": col_idx,
-                "merged": False,
-                "value": cell.value,
-                "font": copy.copy(cell.font),
-                "fill": copy.copy(cell.fill),
-                "border": copy.copy(cell.border),
-                "alignment": copy.copy(cell.alignment),
-                "number_format": cell.number_format,
-            })
-
-        return copied
-
-    def _paste_row_data(self, row_index: int, copied: List[Dict]) -> None:
-        """Schreibt zuvor kopierte Zell-Daten in eine Zeile."""
-        ws = self._worksheet
-        for cell_data in copied:
-            if cell_data.get("merged"):
-                continue
-            cell = ws.cell(row=row_index, column=cell_data["col"])
-            cell.value = cell_data["value"]
-            cell.font = cell_data["font"]
-            cell.fill = cell_data["fill"]
-            cell.border = cell_data["border"]
-            cell.alignment = cell_data["alignment"]
-            cell.number_format = cell_data["number_format"]
-
-    def move_row_after(
-        self,
-        source_no: Any,
-        after_no: Any,
-    ) -> int:
+    def move_row_after(self, source_no: Any, after_no: Any) -> int:
         """
         Verschiebt die Zeile mit No=source_no direkt NACH die Zeile mit No=after_no.
 
-        Das neue No wird automatisch als ganzzahliger Mittelwert zwischen after_no
-        und der nächsten Zeile darunter berechnet:
-            new_no = int((after_no + below_no) / 2)
+        Verwendet Excel COM (Rows.Cut + Rows.Insert), damit:
+          - Formatierung, Farben und Formeln vollständig erhalten bleiben
+          - AutoSave / AutoSync in Excel-Online-Dateien aktiv bleibt
+
+        new_no = int((after_no + next_below_no) / 2)
 
         Bricht mit ValueError ab wenn:
           - source_no oder after_no nicht existieren
-          - Kein ganzzahliger Mittelwert möglich (z.B. after_no=1026, below=1027)
+          - Kein ganzzahliger Mittelwert möglich
           - Das berechnete new_no bereits als No existiert
           - after_no und source_no identisch sind
 
@@ -341,18 +313,10 @@ class ExcelEditor:
 
         Returns:
             new_no: Der tatsächlich vergebene No-Wert
-
-        Beispiel:
-            new_no = editor.move_row_after("1010", "1026")
-            # Zeilen: ...1025, 1026, 1030...
-            # → new_no = int((1026+1030)/2) = 1028
-            # → ...1025, 1026, 1028(ehem. 1010), 1030...
         """
-        from openpyxl.cell.cell import MergedCell
-
         no_col = self._find_no_column()
         ws = self._worksheet
-        min_row = self.config.header_row + 1
+        last_row = ws.used_range.last_cell.row
 
         # --- 1. Source- und After-Zeile finden ---
         source_idx = self._find_row_by_no(source_no)
@@ -362,28 +326,26 @@ class ExcelEditor:
             raise ValueError("Quell- und Zielzeile sind identisch.")
 
         try:
-            after_no_int = int(after_no)
+            after_no_int = int(float(after_no))
         except (ValueError, TypeError):
             raise ValueError(f"No='{after_no}' ist kein ganzzahliger Wert.")
 
         # --- 2. Nächste Zeile unter after_idx finden (source überspringen) ---
-        # Wir durchsuchen die Zeilen nach after_idx der Reihe nach
         below_no_int: Optional[int] = None
-        for row in ws.iter_rows(min_row=after_idx + 1):
-            if row[0].row == source_idx:
-                continue  # source-Zeile ignorieren
-            cell = row[no_col - 1]
-            if isinstance(cell, MergedCell) or cell.value is None:
+        for row_idx in range(after_idx + 1, last_row + 1):
+            if row_idx == source_idx:
+                continue
+            val = ws.range(row_idx, no_col).value
+            if val is None:
                 continue
             try:
-                below_no_int = int(cell.value)
+                below_no_int = int(float(val))
                 break
             except (ValueError, TypeError):
                 continue
 
         # --- 3. Neues No berechnen ---
         if below_no_int is None:
-            # Kein Nachfolger → after_no + 10
             new_no = after_no_int + 10
         else:
             raw_mid = (after_no_int + below_no_int) / 2
@@ -405,37 +367,18 @@ class ExcelEditor:
                 f"{below_no_int} vergrößern."
             )
         except ValueError as e:
-            if f"No={new_no}" in str(e) and "bereits vergeben" in str(e):
+            if "bereits vergeben" in str(e):
                 raise
-            # _find_row_by_no hat ValueError "nicht gefunden" geworfen → Wert ist frei
 
-        # --- 5. Source-Zeile sichern und No-Wert überschreiben ---
-        copied_cells = self._copy_row_data(source_idx)
-        source_height = ws.row_dimensions[source_idx].height
+        # --- 5. No-Wert in der Quellzeile VOR dem Verschieben setzen ---
+        ws.range(source_idx, no_col).value = new_no
 
-        for cell_data in copied_cells:
-            if not cell_data.get("merged") and cell_data["col"] == no_col:
-                cell_data["value"] = new_no
-                break
-
-        # --- 6. Verschieben: erst löschen/einfügen je nach Reihenfolge ---
-        if source_idx < after_idx:
-            # Source liegt ÜBER der Zielposition:
-            # erst source löschen (after_idx rutscht um 1 hoch), dann einfügen
-            ws.delete_rows(source_idx)
-            adjusted_after = after_idx - 1
-            ws.insert_rows(adjusted_after + 1)
-            self._paste_row_data(adjusted_after + 1, copied_cells)
-            if source_height:
-                ws.row_dimensions[adjusted_after + 1].height = source_height
-        else:
-            # Source liegt UNTER der Zielposition:
-            # erst einfügen (source rutscht um 1 runter), dann source löschen
-            ws.insert_rows(after_idx + 1)
-            self._paste_row_data(after_idx + 1, copied_cells)
-            if source_height:
-                ws.row_dimensions[after_idx + 1].height = source_height
-            ws.delete_rows(source_idx + 1)
+        # --- 6. Zeile via Excel COM verschieben (Cut + Insert) ---
+        # Rows(n).Cut() markiert die Zeile als "ausgeschnitten".
+        # Rows(m).Insert(xlShiftDown) fügt sie vor Zeile m ein → landet nach after_idx.
+        # Die Indizes beziehen sich auf den aktuellen Zustand – kein manuelles Anpassen nötig.
+        ws.api.Rows(source_idx).Cut()
+        ws.api.Rows(after_idx + 1).Insert(Shift=-4121)  # -4121 = xlShiftDown
 
         return new_no
 
@@ -455,21 +398,30 @@ class ExcelEditor:
 
     def save(self, output_path: Optional[Path] = None) -> Path:
         """
-        Speichert die Datei.
+        Speichert die Datei über Excel (AutoSave bleibt aktiv).
 
         Args:
-            output_path: Zielpfad (Standard: überschreibt Originaldatei)
+            output_path: Zielpfad für eine Kopie (Standard: Original speichern)
 
         Returns:
             Pfad zur gespeicherten Datei
         """
-        target = output_path or self.config.file_path
-        self._workbook.save(target)
-        return target
+        if output_path is not None:
+            # SaveCopyAs speichert eine Kopie ohne die aktive Mappe zu schließen
+            self._workbook.api.SaveCopyAs(str(output_path.resolve()))
+            return output_path
+        else:
+            self._workbook.save()
+            return self.config.file_path
 
     def close(self) -> None:
-        """Schließt die Arbeitsmappe."""
-        self._workbook.close()
+        """Schließt die Arbeitsmappe (nur wenn wir die Excel-Instanz selbst geöffnet haben)."""
+        if self._owns_app and self._app is not None:
+            try:
+                self._workbook.close(save_changes=False)
+                self._app.quit()
+            except Exception:
+                pass
 
     # Context Manager Support
     def __enter__(self):
