@@ -1,7 +1,5 @@
 # Minimale Abhängigkeiten – werden automatisch über pyproject.toml installiert.
 # Nach dem Clonen: pip install -e .
-#
-# VORAUSSETZUNG: Windows + Microsoft Excel installiert (xlwings nutzt Excel COM)
-xlwings>=0.30
+openpyxl>=3.1
 pydantic>=2.0
 pyinstaller>=6.0
