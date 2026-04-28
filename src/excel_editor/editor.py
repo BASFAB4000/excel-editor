@@ -10,6 +10,10 @@ die geänderte Datei und synchronisiert sie automatisch.
 from __future__ import annotations
 
 import copy
+import re
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,6 +26,86 @@ from .models import CellInfo, ExcelReadConfig, RowData, SheetInfo
 # ---------------------------------------------------------------------------
 # Hilfsfunktionen (privat)
 # ---------------------------------------------------------------------------
+
+# Namespace-Deklarationen, die für Microsoft-365-Erweiterungen benötigt werden
+_MS_EXT_NAMESPACES = [
+    ("x15",  "http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"),
+    ("x14",  "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"),
+    ("xr",   "http://schemas.microsoft.com/office/spreadsheetml/2014/revision"),
+    ("xr2",  "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2"),
+    ("xr6",  "http://schemas.microsoft.com/office/spreadsheetml/2016/revision6"),
+    ("xr10", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision10"),
+]
+
+
+def _read_workbook_extlst(file_path: Path) -> Optional[str]:
+    """
+    Liest das <extLst>-Element aus xl/workbook.xml.
+    Dieses Element enthält u.a. <x15:workbookPr autoSave="1"/>,
+    das die AutoSave-Funktion in Excel steuert.
+    """
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "xl/workbook.xml" not in zf.namelist():
+                return None
+            content = zf.read("xl/workbook.xml").decode("utf-8")
+            match = re.search(r"<extLst\b[^>]*>.*?</extLst>", content, re.DOTALL)
+            if match:
+                return match.group(0)
+    except Exception:
+        pass
+    return None
+
+
+def _restore_workbook_extlst(file_path: Path, extlst: str) -> None:
+    """
+    Schreibt das gesicherte <extLst>-Element zurück in xl/workbook.xml
+    der gespeicherten xlsx-Datei. Verhindert, dass openpyxl die
+    AutoSave-Einstellung von Excel deaktiviert.
+    """
+    tmp_fd, tmp_name = tempfile.mkstemp(suffix=".xlsx", dir=file_path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(file_path, "r") as zin, \
+             zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == "xl/workbook.xml":
+                    content = data.decode("utf-8")
+
+                    # Namespace-Deklarationen ergänzen, die im extLst referenziert werden
+                    def _ensure_namespaces(m: re.Match) -> str:
+                        tag = m.group(0)
+                        for prefix, uri in _MS_EXT_NAMESPACES:
+                            if f"{prefix}:" in extlst and f'xmlns:{prefix}=' not in tag:
+                                tag = re.sub(r"(\s*/?>)$", f' xmlns:{prefix}="{uri}"\\1', tag)
+                        return tag
+
+                    content = re.sub(r"<workbook\b[^>]*>", _ensure_namespaces, content)
+
+                    # extLst einfügen oder vorhandenes ersetzen
+                    if re.search(r"<extLst\b", content):
+                        content = re.sub(
+                            r"<extLst\b[^>]*>.*?</extLst>",
+                            extlst,
+                            content,
+                            flags=re.DOTALL,
+                        )
+                    else:
+                        content = content.replace("</workbook>", extlst + "</workbook>")
+
+                    data = content.encode("utf-8")
+                zout.writestr(item, data)
+    except Exception:
+        import os
+        os.close(tmp_fd)
+        tmp_path.unlink(missing_ok=True)
+        raise
+    else:
+        import os
+        os.close(tmp_fd)
+        shutil.move(str(tmp_path), str(file_path))
+
 
 def _get_bg_color(cell) -> Optional[str]:
     """Extrahiert die Hintergrundfarbe einer Zelle als Hex-String."""
@@ -90,6 +174,9 @@ class ExcelEditor:
 
     def __init__(self, config: ExcelReadConfig) -> None:
         self.config = config
+        # AutoSave-Erweiterung vor dem Laden sichern, da openpyxl sie beim
+        # Speichern nicht erhält (x15:workbookPr autoSave="1").
+        self._workbook_extlst: Optional[str] = _read_workbook_extlst(config.file_path)
         # data_only=False -> Formeln werden als Formelstring erhalten
         self._workbook = openpyxl.load_workbook(
             config.file_path, data_only=False
@@ -409,6 +496,9 @@ class ExcelEditor:
         """
         target = output_path or self.config.file_path
         self._workbook.save(target)
+        # AutoSave-Erweiterung wiederherstellen, die openpyxl entfernt hat
+        if self._workbook_extlst:
+            _restore_workbook_extlst(target, self._workbook_extlst)
         return target
 
     def close(self) -> None:
