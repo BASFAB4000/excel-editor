@@ -11,8 +11,10 @@ Interaktiv (Nutzer wird Schritt für Schritt gefragt):
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 from pydantic import ValidationError
 
@@ -36,9 +38,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--file", "-f",
+        type=Path,
+        default=None,
+        help="Dateiname oder Pfad zur Excel-Datei (optional – wird sonst abgefragt)",
+    )
+    parser.add_argument(
+        "--path", "-p",
         type=lambda p: Path(p).expanduser().resolve(),
         default=None,
-        help="Pfad zur Excel-Datei (optional – wird sonst abgefragt)",
+        metavar="DIR",
+        help="Verzeichnis, in dem nach --file gesucht wird",
+    )
+    parser.add_argument(
+        "--SID",
+        nargs="+",
+        metavar="SID",
+        default=None,
+        help=(
+            "1–10 dreistellige System-IDs (z.B. ZPP ZMR DSC VA1). "
+            "Pro SID wird in --path ein Unterordner gesucht, der die SID enthält, "
+            "und darin die Datei COP_<SID>_Migration.xlsx."
+        ),
     )
     parser.add_argument(
         "--sheet", "-s",
@@ -205,6 +225,170 @@ def _detect_header_row(editor: ExcelEditor, max_scan: int = 20) -> int:
 
 
 # ---------------------------------------------------------------------------
+# SID-Modus
+# ---------------------------------------------------------------------------
+
+_MAX_SIDS = 10
+
+
+def _find_sid_files(
+    base_path: Path,
+    sids: List[str],
+) -> List[Tuple[str, Optional[Path], Optional[Path]]]:
+    """
+    Sucht für jede SID:
+      1. Einen Unterordner in base_path, dessen Name die SID als eigenständiges Token enthält
+         (z.B. '118_ZPP - Coatings BW' oder '114_VA1 - Process Control').
+      2. In diesem Ordner die Datei COP_<SID>_Migration.xlsx.
+
+    Gibt eine Liste von (sid, folder_or_None, file_or_None) zurück.
+    """
+    print(f"\n[SID] {len(sids)} SID(s) angegeben: {', '.join(sids)}")
+    print(f"[SID] Basisverzeichnis: {base_path}\n")
+
+    # Alle Unterordner auflisten
+    try:
+        subdirs = [d for d in base_path.iterdir() if d.is_dir()]
+    except PermissionError:
+        print(f"[FEHLER] Kein Zugriff auf Verzeichnis: {base_path}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"[FEHLER] Verzeichnis nicht gefunden: {base_path}", file=sys.stderr)
+        sys.exit(1)
+
+    results: List[Tuple[str, Optional[Path], Optional[Path]]] = []
+
+    for sid in sids:
+        # SID muss als eigenständiges Token im Ordnernamen vorkommen
+        # Erlaubte Trennzeichen: _, -, Leerzeichen, Klammern, Anfang/Ende des Namens
+        pattern = re.compile(
+            r'(?<![A-Za-z0-9])' + re.escape(sid) + r'(?![A-Za-z0-9])',
+        )
+        matches = [d for d in subdirs if pattern.search(d.name)]
+
+        if not matches:
+            print(
+                f"  [{sid}]  Ordner : NICHT GEFUNDEN"
+                f" – kein Unterordner in '{base_path.name}' enthält '{sid}'"
+            )
+            results.append((sid, None, None))
+            continue
+
+        if len(matches) > 1:
+            names = ", ".join(d.name for d in matches)
+            print(
+                f"  [{sid}]  Ordner : MEHRDEUTIG – {len(matches)} Treffer gefunden: {names}"
+            )
+            results.append((sid, None, None))
+            continue
+
+        folder = matches[0]
+        print(f"  [{sid}]  Ordner : gefunden → {folder.name}")
+
+        # Excel-Datei in dem gefundenen Ordner suchen
+        excel_name = f"COP_{sid}_Migration.xlsx"
+        excel_path = folder / excel_name
+
+        if excel_path.exists():
+            print(f"  [{sid}]  Datei  : gefunden → {excel_name}")
+            results.append((sid, folder, excel_path))
+        else:
+            print(
+                f"  [{sid}]  Datei  : NICHT GEFUNDEN"
+                f" – '{excel_name}' nicht in '{folder.name}'"
+            )
+            results.append((sid, folder, None))
+
+    return results
+
+
+def _run_sid_mode(args) -> None:
+    """Verarbeitet alle SIDs: findet Ordner + Dateien und führt die Aktion aus."""
+    sids: List[str] = args.SID
+
+    if len(sids) > _MAX_SIDS:
+        print(
+            f"[FEHLER] Zu viele SIDs angegeben: {len(sids)}"
+            f" (Maximum: {_MAX_SIDS})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.path is None:
+        print("[FEHLER] --SID benötigt --path als Basisverzeichnis.", file=sys.stderr)
+        sys.exit(1)
+
+    sid_files = _find_sid_files(args.path, sids)
+
+    # Zusammenfassung
+    found    = [(s, f, x) for s, f, x in sid_files if x is not None]
+    missing  = [(s, f, x) for s, f, x in sid_files if x is None]
+
+    print(f"\n[SID] Gefunden: {len(found)}/{len(sids)} Dateien")
+    if missing:
+        print(f"[SID] Nicht verarbeitbar: {', '.join(s for s, *_ in missing)}")
+
+    if not found:
+        print("[SID] Keine Dateien zum Verarbeiten gefunden. Abbruch.", file=sys.stderr)
+        sys.exit(1)
+
+    # Jede gefundene Datei verarbeiten
+    errors: List[str] = []
+    for sid, _folder, excel_path in found:
+        print(f"\n{'='*55}")
+        print(f"  Verarbeite SID: {sid}")
+        print(f"  Datei: {excel_path}")
+        print(f"{'='*55}")
+
+        try:
+            config = ExcelReadConfig(file_path=excel_path)
+        except (ValueError, ValidationError) as e:
+            print(f"  [FEHLER] {e}", file=sys.stderr)
+            errors.append(sid)
+            continue
+
+        with ExcelEditor(config) as editor:
+            if args.sheet is not None:
+                try:
+                    config.sheet_name = args.sheet
+                    editor._worksheet = editor._get_worksheet()
+                except ValueError as e:
+                    print(f"  [FEHLER] {e}", file=sys.stderr)
+                    errors.append(sid)
+                    continue
+
+            if args.header_row is not None:
+                config.header_row = args.header_row
+            else:
+                detected = _detect_header_row(editor)
+                config.header_row = detected
+                if detected != 1:
+                    print(f"  [i] Header-Zeile erkannt: Zeile {detected}")
+
+            if args.move_from and args.move_after:
+                # output pro SID in den jeweiligen Ordner schreiben
+                args_copy = _args_with_file(args, excel_path)
+                _do_move_row(editor, args_copy)
+            else:
+                print_rows(editor, args.rows)
+
+    # Abschlussbericht
+    print(f"\n{'='*55}")
+    print(f"[SID] Verarbeitung abgeschlossen.")
+    print(f"[SID] Erfolgreich: {len(found) - len(errors)}/{len(found)}")
+    if errors:
+        print(f"[SID] Fehler bei: {', '.join(errors)}", file=sys.stderr)
+
+
+class _args_with_file:  # noqa: N801
+    """Kleiner Adapter: überschreibt args.file und args.output für _do_move_row."""
+    def __init__(self, args, file_path: Path) -> None:
+        self.__dict__.update(vars(args))
+        self.file   = file_path
+        self.output = None  # immer in-place speichern
+
+
+# ---------------------------------------------------------------------------
 # Einstiegspunkt
 # ---------------------------------------------------------------------------
 
@@ -212,9 +396,18 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    # --- SID-Modus: mehrere Dateien über SID-Ordnerstruktur verarbeiten ---
+    if args.SID is not None:
+        _run_sid_mode(args)
+        return
+
     # --- Pfad bestimmen: Argument oder interaktive Abfrage ---
     if args.file is not None:
-        file_path = args.file
+        if args.path is not None:
+            # --path + --file kombinieren: Verzeichnis / Dateiname
+            file_path = args.path / args.file
+        else:
+            file_path = args.file.expanduser().resolve()
     else:
         print("=" * 55)
         print("  RISE Planungsexcel Editor – Interaktiver Modus")
