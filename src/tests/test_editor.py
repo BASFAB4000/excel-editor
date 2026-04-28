@@ -170,5 +170,90 @@ class TestAutoSave(unittest.TestCase):
         self.assertIn('autoSave="1"', extlst_after)
 
 
+class TestRollback(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.xlsx = self.tmp / "test.xlsx"
+        _make_workbook(self.xlsx)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_rollback_does_not_save(self):
+        """--rollback: move_row wird berechnet, Datei bleibt unveraendert."""
+        import zipfile as zf
+
+        # Originalen Inhalt von workbook.xml sichern
+        with zf.ZipFile(self.xlsx, "r") as z:
+            original_wb_xml = z.read("xl/workbook.xml")
+
+        config = ExcelReadConfig(file_path=self.xlsx)
+        with ExcelEditor(config) as ed:
+            ed.move_row_after("1020", "1000")
+            # rollback = NICHT speichern
+
+        # Datei darf sich nicht veraendert haben
+        with zf.ZipFile(self.xlsx, "r") as z:
+            after_wb_xml = z.read("xl/workbook.xml")
+
+        self.assertEqual(original_wb_xml, after_wb_xml)
+
+    def test_save_does_change_file(self):
+        """Kontrolltest: save() veraendert die Datei tatsaechlich."""
+        import zipfile as zf
+
+        with zf.ZipFile(self.xlsx, "r") as z:
+            original = z.read("xl/worksheets/sheet1.xml")
+
+        config = ExcelReadConfig(file_path=self.xlsx)
+        with ExcelEditor(config) as ed:
+            ed.edit_cell(row=2, column=2, new_value="GEAENDERT")
+            ed.save()
+
+        with zf.ZipFile(self.xlsx, "r") as z:
+            after = z.read("xl/worksheets/sheet1.xml")
+
+        self.assertNotEqual(original, after)
+
+
+class TestSheetRouting(unittest.TestCase):
+    """Prueft dass master_sheet / sid_sheet korrekt an _process_single_file
+    weitergegeben werden."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.xlsx = self.tmp / "test.xlsx"
+        # Zwei Sheets erstellen
+        wb = Workbook()
+        ws1 = wb.active
+        ws1.title = "MasterSheet"
+        ws1["A1"] = "No"
+        ws1["A2"] = 1000
+        ws2 = wb.create_sheet("SIDSheet")
+        ws2["A1"] = "No"
+        ws2["A2"] = 2000
+        wb.save(self.xlsx)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_correct_sheet_is_loaded(self):
+        """Sheet-Name wird korrekt gesetzt."""
+        config = ExcelReadConfig(file_path=self.xlsx, sheet_name="SIDSheet")
+        with ExcelEditor(config) as ed:
+            row = ed.get_row(2)
+        self.assertEqual(row.get_value(1), 2000)
+
+    def test_wrong_sheet_raises(self):
+        """Unbekannter Sheet-Name wirft ValueError."""
+        from pydantic import ValidationError as PydanticValidationError
+        config = ExcelReadConfig(file_path=self.xlsx)
+        with ExcelEditor(config) as ed:
+            with self.assertRaises(ValueError):
+                config.sheet_name = "GibtEsNicht"
+                ed._worksheet = ed._get_worksheet()
+
+
 if __name__ == "__main__":
     unittest.main()

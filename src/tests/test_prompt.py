@@ -56,6 +56,26 @@ class TestCliParsing(unittest.TestCase):
         args = parser.parse_args(["--file", "test.xlsx", "--header-row", "3"])
         self.assertEqual(args.header_row, 3)
 
+    def test_master_sheet(self):
+        parser = build_parser()
+        args = parser.parse_args(["--path", "/tmp", "--SID", "ZPP", "--master-sheet", "Template Sheet"])
+        self.assertEqual(args.master_sheet, "Template Sheet")
+
+    def test_sid_sheet(self):
+        parser = build_parser()
+        args = parser.parse_args(["--path", "/tmp", "--SID", "ZPP", "--sid-sheet", "HANA Tenant Copy"])
+        self.assertEqual(args.sid_sheet, "HANA Tenant Copy")
+
+    def test_rollback_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["--file", "test.xlsx", "--rollback"])
+        self.assertTrue(args.rollback)
+
+    def test_rollback_default_false(self):
+        parser = build_parser()
+        args = parser.parse_args(["--file", "test.xlsx"])
+        self.assertFalse(args.rollback)
+
 
 if __name__ == "__main__":
     unittest.main()

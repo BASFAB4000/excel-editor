@@ -98,6 +98,9 @@ class TestFindSidFiles(unittest.TestCase):
         class FakeArgs:
             SID = too_many
             path = self.tmp
+            sid_sheet = None
+            master_sheet = None
+            rollback = False
 
         with self.assertRaises(SystemExit):
             _run_sid_mode(FakeArgs())

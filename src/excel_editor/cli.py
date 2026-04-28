@@ -30,9 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="excel-editor",
         description=(
-            "RISE Planungsexcel Editor.\n"
-            "Ohne Argumente: interaktiver Modus (Nutzer wird gefragt).\n"
-            "Mit --file: nicht-interaktiv, z.B. für agentic AI."
+            "RISE Planungsexcel Editor – liest und schreibt Excel-Dateien mit Erhalt der Formatierung.\n"
+            "\n"
+            "MODI:\n"
+            "  Einzeldatei  : --file <datei> [--sheet <sheet>] --move-from X --move-after Y --save\n"
+            "  Batch (SIDs) : --path <verz> --SID ZPP ZMR ... [--file template.xlsx]\n"
+            "                 [--master-sheet <sheet>] [--sid-sheet <sheet>]\n"
+            "                 --move-from X --move-after Y\n"
+            "  Dry-Run      : beliebiger Befehl + --rollback  (keine Datei wird veraendert)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -40,14 +45,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--file", "-f",
         type=Path,
         default=None,
-        help="Dateiname oder Pfad zur Excel-Datei (optional – wird sonst abgefragt)",
+        help=(
+            "Dateiname der Excel-Datei. "
+            "Ohne --path: vollstaendiger Pfad. "
+            "Mit --path: nur der Dateiname, z.B. COP_Migration_Template.xlsx. "
+            "Im SID-Modus: wird als Template-Datei direkt im --path verarbeitet."
+        ),
     )
     parser.add_argument(
         "--path", "-p",
         type=lambda p: Path(p).expanduser().resolve(),
         default=None,
         metavar="DIR",
-        help="Verzeichnis, in dem nach --file gesucht wird",
+        help=(
+            "Basisverzeichnis. "
+            "Ohne --SID: wird mit --file kombiniert. "
+            "Mit --SID: Verzeichnis mit SID-Unterordnern, z.B. '999_TEST - System Linie/'."
+        ),
     )
     parser.add_argument(
         "--SID",
@@ -55,16 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SID",
         default=None,
         help=(
-            "1–10 dreistellige System-IDs (z.B. ZPP ZMR DSC VA1). "
-            "Pro SID wird in --path ein Unterordner gesucht, der die SID enthält, "
-            "und darin die Datei COP_<SID>_Migration.xlsx."
+            "1-10 dreistellige System-IDs (z.B. ZPP ZMR DSC VA1). "
+            "Aktiviert den Batch-Modus: Pro SID wird in --path ein Unterordner gesucht "
+            "(z.B. '118_ZPP - Coatings BW'), und darin die Datei COP_<SID>_Migration.xlsx. "
+            "Zusaetzlich wird --file im --path als Template verarbeitet, falls angegeben."
         ),
     )
     parser.add_argument(
         "--sheet", "-s",
         type=str,
         default=None,
-        help="Name des Sheets (optional – wird sonst abgefragt)",
+        help="Sheet-Name fuer den Einzeldatei-Modus (ohne --SID). Wird sonst interaktiv abgefragt.",
     )
     parser.add_argument(
         "--list-sheets",
@@ -96,25 +111,61 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="NO",
-        help="'No'-Wert der Zeile, die verschoben werden soll",
+        help="'No'-Wert der Zeile, die verschoben werden soll (z.B. 1005).",
     )
     parser.add_argument(
         "--move-after",
         type=str,
         default=None,
         metavar="NO",
-        help="'No'-Wert der Zeile, NACH der eingefügt werden soll",
+        help=(
+            "'No'-Wert der Zeile, NACH der eingefuegt werden soll (z.B. 1020). "
+            "Neues No = Mittelwert zwischen dieser Zeile und der naechsten."
+        ),
     )
     parser.add_argument(
         "--save",
         action="store_true",
-        help="Datei nach der Bearbeitung speichern (überschreibt Original)",
+        help="Datei nach der Bearbeitung speichern (ueberschreibt Original). Im SID-Modus immer aktiv.",
     )
     parser.add_argument(
         "--output", "-o",
         type=lambda p: Path(p).expanduser().resolve(),
         default=None,
         help="Speichern unter neuem Pfad statt das Original zu überschreiben",
+    )
+    # --- SID-Modus erweitert ---
+    parser.add_argument(
+        "--master-sheet",
+        type=str,
+        default=None,
+        dest="master_sheet",
+        metavar="SHEET",
+        help=(
+            "Sheet-Name fuer die Template-Datei (--file) im SID-Modus. "
+            "Beispiel: 'HANA Tenant Copy Optimize'."
+        ),
+    )
+    parser.add_argument(
+        "--sid-sheet",
+        type=str,
+        default=None,
+        dest="sid_sheet",
+        metavar="SHEET",
+        help=(
+            "Sheet-Name fuer alle SID-Dateien im Batch-Modus. "
+            "Beispiel: 'HANA Tenant Copy'. "
+            "Fehlt dieses Flag, wird der Name einmalig interaktiv abgefragt."
+        ),
+    )
+    parser.add_argument(
+        "--rollback",
+        action="store_true",
+        help=(
+            "Dry-Run Modus: Alle Aenderungen werden berechnet und angezeigt, "
+            "aber KEINE Datei wird gespeichert. "
+            "Ideal zum Testen, ob das Tool korrekt funktioniert."
+        ),
     )
     return parser
 
@@ -302,9 +353,15 @@ def _find_sid_files(
     return results
 
 
-def _process_single_file(excel_path: Path, label: str, args) -> bool:
+def _process_single_file(
+    excel_path: Path,
+    label: str,
+    args,
+    sheet_name: Optional[str] = None,
+) -> bool:
     """
     Verarbeitet eine einzelne Excel-Datei im SID-Modus.
+    sheet_name: explizit übergebener Sheet-Name (überschreibt args.sheet).
     Gibt True bei Erfolg zurück, False bei Fehler.
     """
     print(f"\n{'='*55}")
@@ -319,9 +376,9 @@ def _process_single_file(excel_path: Path, label: str, args) -> bool:
         return False
 
     with ExcelEditor(config) as editor:
-        if args.sheet is not None:
+        if sheet_name is not None:
             try:
-                config.sheet_name = args.sheet
+                config.sheet_name = sheet_name
                 editor._worksheet = editor._get_worksheet()
             except ValueError as e:
                 print(f"  [FEHLER] {e}", file=sys.stderr)
@@ -361,6 +418,17 @@ def _run_sid_mode(args) -> None:
         print("[FEHLER] --SID benötigt --path als Basisverzeichnis.", file=sys.stderr)
         sys.exit(1)
 
+    # --- Sheet-Name für SID-Dateien bestimmen ---
+    if args.sid_sheet is not None:
+        sid_sheet_name: Optional[str] = args.sid_sheet
+        print(f"[SID] Sheet für SID-Dateien: '{sid_sheet_name}'")
+    else:
+        raw = input("\n[SID] Sheet-Name für SID-Dateien eingeben (Enter = aktives Sheet): ").strip()
+        sid_sheet_name = raw or None
+
+    if args.rollback:
+        print("\n[DRY-RUN] --rollback aktiv: Änderungen werden berechnet aber NICHT gespeichert.\n")
+
     # --- 1. Template-Datei direkt im --path verarbeiten (falls --file angegeben) ---
     total = 0
     errors = 0
@@ -369,7 +437,12 @@ def _run_sid_mode(args) -> None:
         template_path = args.path / args.file
         total += 1
         print(f"\n[TEMPLATE] Verarbeite Template-Datei: {template_path}")
-        ok = _process_single_file(template_path, f"Template: {args.file}", args)
+        ok = _process_single_file(
+            template_path,
+            f"Template: {args.file}",
+            args,
+            sheet_name=args.master_sheet,
+        )
         if not ok:
             errors += 1
     else:
@@ -387,7 +460,12 @@ def _run_sid_mode(args) -> None:
 
     for sid, _folder, excel_path in found:
         total += 1
-        ok = _process_single_file(excel_path, f"SID: {sid}", args)
+        ok = _process_single_file(
+            excel_path,
+            f"SID: {sid}",
+            args,
+            sheet_name=sid_sheet_name,
+        )
         if not ok:
             errors += 1
 
@@ -406,7 +484,7 @@ class _args_with_file:  # noqa: N801
         self.__dict__.update(vars(args))
         self.file   = file_path
         self.output = None   # immer in-place speichern
-        self.save   = True   # im Batch-Modus kein interaktiver Prompt
+        self.save   = not getattr(args, 'rollback', False)  # rollback = kein Speichern
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +599,11 @@ def _do_move_row(editor: ExcelEditor, args) -> None:
         sys.exit(1)
 
     print(f"  [OK] Verschoben. Neues No={new_no}")
+
+    # Rollback: Änderungen simulieren, nicht speichern
+    if getattr(args, 'rollback', False):
+        print("  [DRY-RUN] Nicht gespeichert (--rollback aktiv).")
+        return
 
     # Speichern
     should_save = args.save or args.output is not None
