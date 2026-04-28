@@ -302,23 +302,7 @@ def _find_sid_files(
     return results
 
 
-def _run_sid_mode(args) -> None:
-    """Verarbeitet alle SIDs: findet Ordner + Dateien und führt die Aktion aus."""
-    sids: List[str] = args.SID
-
-    if len(sids) > _MAX_SIDS:
-        print(
-            f"[FEHLER] Zu viele SIDs angegeben: {len(sids)}"
-            f" (Maximum: {_MAX_SIDS})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    if args.path is None:
-        print("[FEHLER] --SID benötigt --path als Basisverzeichnis.", file=sys.stderr)
-        sys.exit(1)
-
-    # --- 1. Template-Datei direkt im --path verarbeiten (falls --file angegeben) ---
+def _process_single_file(excel_path: Path, label: str, args) -> bool:
     """
     Verarbeitet eine einzelne Excel-Datei im SID-Modus.
     Gibt True bei Erfolg zurück, False bei Fehler.
