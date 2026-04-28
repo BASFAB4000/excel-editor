@@ -316,22 +316,36 @@ class ExcelEditor:
             f"Verfügbare Spalten: {list(info.headers.values())}"
         )
 
+    @staticmethod
+    def _normalize_no(value: Any) -> str:
+        """
+        Normalisiert einen No-Wert für den Vergleich.
+        1005, 1005.0, '1005', '1005.0' → '1005'
+        Nicht-numerische Werte werden als String zurückgegeben.
+        """
+        try:
+            return str(int(float(str(value))))
+        except (ValueError, TypeError):
+            return str(value)
+
     def _find_row_by_no(self, no_value: Any) -> int:
         """
         Sucht den Zeilenindex der Zeile mit dem angegebenen 'No'-Wert.
         Wirft ValueError wenn nicht gefunden.
+        Vergleich ist numerisch-tolerant: 1005 == 1005.0 == '1005'.
         """
         from openpyxl.cell.cell import MergedCell
 
         no_col = self._find_no_column()
         ws = self._worksheet
         min_row = self.config.header_row + 1
+        target = self._normalize_no(no_value)
 
         for row in ws.iter_rows(min_row=min_row):
             cell = row[no_col - 1]
             if isinstance(cell, MergedCell):
                 continue
-            if cell.value is not None and str(cell.value) == str(no_value):
+            if cell.value is not None and self._normalize_no(cell.value) == target:
                 return row[0].row
 
         raise ValueError(f"Zeile mit No='{no_value}' nicht gefunden.")
@@ -401,7 +415,7 @@ class ExcelEditor:
                 continue
             last_data_idx = row[0].row
             try:
-                no_int = int(cell.value)
+                no_int = int(float(str(cell.value)))
             except (ValueError, TypeError):
                 continue
             if no_int < target_int:

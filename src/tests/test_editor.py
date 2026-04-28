@@ -141,6 +141,34 @@ class TestMoveRow(unittest.TestCase):
             row_idx = ed._find_row_by_no("1080")
             self.assertIsNotNone(row_idx)
 
+    def test_find_row_by_no_matches_float_cell(self):
+        """No-Werte als Float (z.B. 1005.0) werden korrekt gefunden."""
+        from openpyxl import load_workbook as lw
+        wb = lw(self.xlsx)
+        ws = wb.active
+        ws["A2"] = 1000.0   # als Float speichern
+        ws["A3"] = 1010.0
+        ws["A4"] = 1020.0
+        wb.save(self.xlsx)
+
+        with self._load() as ed:
+            idx = ed._find_row_by_no("1010")
+        self.assertIsNotNone(idx)
+
+    def test_move_row_with_float_no(self):
+        """Verschieben funktioniert auch wenn No als Float gespeichert ist."""
+        from openpyxl import load_workbook as lw
+        wb = lw(self.xlsx)
+        ws = wb.active
+        ws["A2"] = 1000.0
+        ws["A3"] = 1010.0
+        ws["A4"] = 1020.0
+        wb.save(self.xlsx)
+
+        with self._load() as ed:
+            new_no = ed.move_row_after("1020", "1000")
+        self.assertEqual(new_no, 1005)
+
 
 class TestAutoSave(unittest.TestCase):
 
