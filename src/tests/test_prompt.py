@@ -1,24 +1,61 @@
+"""
+Tests für CLI-Argument-Parsing: --path + --file Kombination, --SID.
+"""
 import unittest
-from unittest.mock import patch, MagicMock
-from excel_editor.prompt import prompt_user_for_input
+from pathlib import Path
 
-class TestPrompt(unittest.TestCase):
+from excel_editor.cli import build_parser
 
-    @patch('builtins.input', side_effect=['test.xlsx', 'Sheet1', 'System1', 'Edit'])
-    def test_prompt_user_for_input(self, mock_input):
-        file_path, sheet_name, system, action = prompt_user_for_input()
-        self.assertEqual(file_path, 'test.xlsx')
-        self.assertEqual(sheet_name, 'Sheet1')
-        self.assertEqual(system, 'System1')
-        self.assertEqual(action, 'Edit')
 
-    @patch('builtins.input', side_effect=['invalid_path.xlsx', 'Sheet1', 'System1', 'Add'])
-    def test_prompt_user_for_input_invalid_path(self, mock_input):
-        file_path, sheet_name, system, action = prompt_user_for_input()
-        self.assertEqual(file_path, 'invalid_path.xlsx')
-        self.assertEqual(sheet_name, 'Sheet1')
-        self.assertEqual(system, 'System1')
-        self.assertEqual(action, 'Add')
+class TestCliParsing(unittest.TestCase):
 
-if __name__ == '__main__':
+    def test_path_and_file_combined(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--file", "COP_Migration_Template.xlsx",
+            "--path", "/tmp/testdir",
+        ])
+        combined = args.path / args.file
+        self.assertEqual(combined, Path("/tmp/testdir/COP_Migration_Template.xlsx"))
+
+    def test_sid_parsed_as_list(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--path", "/tmp",
+            "--SID", "ZPP", "ZMR", "DSC", "VA1",
+        ])
+        self.assertEqual(args.SID, ["ZPP", "ZMR", "DSC", "VA1"])
+
+    def test_sid_single(self):
+        parser = build_parser()
+        args = parser.parse_args(["--path", "/tmp", "--SID", "ZPP"])
+        self.assertEqual(args.SID, ["ZPP"])
+
+    def test_no_sid_is_none(self):
+        parser = build_parser()
+        args = parser.parse_args(["--file", "test.xlsx"])
+        self.assertIsNone(args.SID)
+
+    def test_move_from_and_after(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--file", "test.xlsx",
+            "--move-from", "1005",
+            "--move-after", "1020",
+        ])
+        self.assertEqual(args.move_from, "1005")
+        self.assertEqual(args.move_after, "1020")
+
+    def test_save_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["--file", "test.xlsx", "--save"])
+        self.assertTrue(args.save)
+
+    def test_header_row(self):
+        parser = build_parser()
+        args = parser.parse_args(["--file", "test.xlsx", "--header-row", "3"])
+        self.assertEqual(args.header_row, 3)
+
+
+if __name__ == "__main__":
     unittest.main()

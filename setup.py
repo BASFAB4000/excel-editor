@@ -8,7 +8,6 @@ setup(
     packages=find_packages(where="src"),
     install_requires=[
         "openpyxl>=3.1",
-        "pandas>=2.0",
         "pydantic>=2.0",
     ],
     entry_points={

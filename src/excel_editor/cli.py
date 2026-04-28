@@ -148,7 +148,7 @@ def _ask_sheet(editor: ExcelEditor) -> str | None:
         print(f"  [{i}] {name}")
 
     if len(sheets) == 1:
-        print(f"  → Nur ein Sheet vorhanden, verwende: '{sheets[0]}'")
+        print(f"  -> Nur ein Sheet vorhanden, verwende: '{sheets[0]}'")
         return sheets[0]
 
     while True:
@@ -283,14 +283,14 @@ def _find_sid_files(
             continue
 
         folder = matches[0]
-        print(f"  [{sid}]  Ordner : gefunden → {folder.name}")
+        print(f"  [{sid}]  Ordner : gefunden -> {folder.name}")
 
         # Excel-Datei in dem gefundenen Ordner suchen
         excel_name = f"COP_{sid}_Migration.xlsx"
         excel_path = folder / excel_name
 
         if excel_path.exists():
-            print(f"  [{sid}]  Datei  : gefunden → {excel_name}")
+            print(f"  [{sid}]  Datei  : gefunden -> {excel_name}")
             results.append((sid, folder, excel_path))
         else:
             print(
@@ -318,74 +318,111 @@ def _run_sid_mode(args) -> None:
         print("[FEHLER] --SID benötigt --path als Basisverzeichnis.", file=sys.stderr)
         sys.exit(1)
 
+    # --- 1. Template-Datei direkt im --path verarbeiten (falls --file angegeben) ---
+    """
+    Verarbeitet eine einzelne Excel-Datei im SID-Modus.
+    Gibt True bei Erfolg zurück, False bei Fehler.
+    """
+    print(f"\n{'='*55}")
+    print(f"  {label}")
+    print(f"  Datei: {excel_path}")
+    print(f"{'='*55}")
+
+    try:
+        config = ExcelReadConfig(file_path=excel_path)
+    except (ValueError, ValidationError) as e:
+        print(f"  [FEHLER] {e}", file=sys.stderr)
+        return False
+
+    with ExcelEditor(config) as editor:
+        if args.sheet is not None:
+            try:
+                config.sheet_name = args.sheet
+                editor._worksheet = editor._get_worksheet()
+            except ValueError as e:
+                print(f"  [FEHLER] {e}", file=sys.stderr)
+                return False
+
+        if args.header_row is not None:
+            config.header_row = args.header_row
+        else:
+            detected = _detect_header_row(editor)
+            config.header_row = detected
+            if detected != 1:
+                print(f"  [i] Header-Zeile erkannt: Zeile {detected}")
+
+        if args.move_from and args.move_after:
+            args_copy = _args_with_file(args, excel_path)
+            _do_move_row(editor, args_copy)
+        else:
+            print_rows(editor, args.rows)
+
+    return True
+
+
+def _run_sid_mode(args) -> None:
+    """Verarbeitet alle SIDs: findet Ordner + Dateien und führt die Aktion aus.
+    Zusätzlich wird --file direkt im --path verarbeitet, falls angegeben."""
+    sids: List[str] = args.SID
+
+    if len(sids) > _MAX_SIDS:
+        print(
+            f"[FEHLER] Zu viele SIDs angegeben: {len(sids)}"
+            f" (Maximum: {_MAX_SIDS})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.path is None:
+        print("[FEHLER] --SID benötigt --path als Basisverzeichnis.", file=sys.stderr)
+        sys.exit(1)
+
+    # --- 1. Template-Datei direkt im --path verarbeiten (falls --file angegeben) ---
+    total = 0
+    errors = 0
+
+    if args.file is not None:
+        template_path = args.path / args.file
+        total += 1
+        print(f"\n[TEMPLATE] Verarbeite Template-Datei: {template_path}")
+        ok = _process_single_file(template_path, f"Template: {args.file}", args)
+        if not ok:
+            errors += 1
+    else:
+        print("\n[TEMPLATE] Kein --file angegeben, Template wird übersprungen.")
+
+    # --- 2. SID-Unterordner verarbeiten ---
     sid_files = _find_sid_files(args.path, sids)
 
-    # Zusammenfassung
-    found    = [(s, f, x) for s, f, x in sid_files if x is not None]
-    missing  = [(s, f, x) for s, f, x in sid_files if x is None]
+    found   = [(s, f, x) for s, f, x in sid_files if x is not None]
+    missing = [(s, f, x) for s, f, x in sid_files if x is None]
 
     print(f"\n[SID] Gefunden: {len(found)}/{len(sids)} Dateien")
     if missing:
         print(f"[SID] Nicht verarbeitbar: {', '.join(s for s, *_ in missing)}")
 
-    if not found:
-        print("[SID] Keine Dateien zum Verarbeiten gefunden. Abbruch.", file=sys.stderr)
-        sys.exit(1)
-
-    # Jede gefundene Datei verarbeiten
-    errors: List[str] = []
     for sid, _folder, excel_path in found:
-        print(f"\n{'='*55}")
-        print(f"  Verarbeite SID: {sid}")
-        print(f"  Datei: {excel_path}")
-        print(f"{'='*55}")
+        total += 1
+        ok = _process_single_file(excel_path, f"SID: {sid}", args)
+        if not ok:
+            errors += 1
 
-        try:
-            config = ExcelReadConfig(file_path=excel_path)
-        except (ValueError, ValidationError) as e:
-            print(f"  [FEHLER] {e}", file=sys.stderr)
-            errors.append(sid)
-            continue
-
-        with ExcelEditor(config) as editor:
-            if args.sheet is not None:
-                try:
-                    config.sheet_name = args.sheet
-                    editor._worksheet = editor._get_worksheet()
-                except ValueError as e:
-                    print(f"  [FEHLER] {e}", file=sys.stderr)
-                    errors.append(sid)
-                    continue
-
-            if args.header_row is not None:
-                config.header_row = args.header_row
-            else:
-                detected = _detect_header_row(editor)
-                config.header_row = detected
-                if detected != 1:
-                    print(f"  [i] Header-Zeile erkannt: Zeile {detected}")
-
-            if args.move_from and args.move_after:
-                # output pro SID in den jeweiligen Ordner schreiben
-                args_copy = _args_with_file(args, excel_path)
-                _do_move_row(editor, args_copy)
-            else:
-                print_rows(editor, args.rows)
-
-    # Abschlussbericht
+    # --- Abschlussbericht ---
     print(f"\n{'='*55}")
-    print(f"[SID] Verarbeitung abgeschlossen.")
-    print(f"[SID] Erfolgreich: {len(found) - len(errors)}/{len(found)}")
+    print(f"[FERTIG] Verarbeitet: {total - errors}/{total} erfolgreich")
     if errors:
-        print(f"[SID] Fehler bei: {', '.join(errors)}", file=sys.stderr)
+        print(f"[FERTIG] {errors} Fehler aufgetreten.", file=sys.stderr)
+        sys.exit(1)
 
 
 class _args_with_file:  # noqa: N801
-    """Kleiner Adapter: überschreibt args.file und args.output für _do_move_row."""
+    """Kleiner Adapter: überschreibt args.file und args.output für _do_move_row.
+    Im SID-Modus wird immer automatisch gespeichert (kein interaktiver Prompt)."""
     def __init__(self, args, file_path: Path) -> None:
         self.__dict__.update(vars(args))
         self.file   = file_path
-        self.output = None  # immer in-place speichern
+        self.output = None   # immer in-place speichern
+        self.save   = True   # im Batch-Modus kein interaktiver Prompt
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +430,13 @@ class _args_with_file:  # noqa: N801
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Windows-Terminals verwenden oft cp1252 oder cp850 – auf UTF-8 umstellen,
+    # damit alle Ausgaben korrekt dargestellt werden.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     parser = build_parser()
     args = parser.parse_args()
 

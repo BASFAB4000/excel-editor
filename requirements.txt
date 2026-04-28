@@ -1,5 +1,12 @@
-# Minimale Abhängigkeiten – werden automatisch über pyproject.toml installiert.
-# Nach dem Clonen: pip install -e .
-openpyxl>=3.1
-pydantic>=2.0
-pyinstaller>=6.0
+annotated-types==0.7.0
+et-xmlfile==2.0.0
+exceptiongroup==1.3.1
+iniconfig==2.1.0
+openpyxl==3.1.5
+packaging==26.2
+pluggy==1.5.0
+pydantic==2.10.6
+pydantic-core==2.27.2
+pytest==8.3.5
+tomli==2.4.1
+typing-extensions==4.13.2
