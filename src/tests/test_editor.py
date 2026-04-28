@@ -127,9 +127,19 @@ class TestMoveRow(unittest.TestCase):
                 ed.move_row_after("1000", "1000")
 
     def test_move_row_after_unknown_no_raises(self):
+        """source_no nicht gefunden -> ValueError."""
         with self._load() as ed:
             with self.assertRaises(ValueError):
                 ed.move_row_after("9999", "1000")
+
+    def test_move_row_after_no_not_found_uses_direct_no(self):
+        """after_no nicht im Sheet -> Zeile wird direkt mit after_no als neuem No eingefügt."""
+        with self._load() as ed:
+            new_no = ed.move_row_after("1020", "1080")
+            self.assertEqual(new_no, 1080)
+            # In-Memory prüfen: No=1080 muss jetzt existieren
+            row_idx = ed._find_row_by_no("1080")
+            self.assertIsNotNone(row_idx)
 
 
 class TestAutoSave(unittest.TestCase):

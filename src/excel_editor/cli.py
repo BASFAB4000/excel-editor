@@ -394,7 +394,12 @@ def _process_single_file(
 
         if args.move_from and args.move_after:
             args_copy = _args_with_file(args, excel_path)
-            _do_move_row(editor, args_copy)
+            try:
+                _do_move_row(editor, args_copy)
+            except ValueError as e:
+                sys.stdout.flush()
+                print(f"  [FEHLER] {e}", file=sys.stderr)
+                return False
         else:
             print_rows(editor, args.rows)
 
@@ -569,7 +574,12 @@ def main() -> None:
             if not args.move_from or not args.move_after:
                 print("[FEHLER] --move-from und --move-after müssen zusammen angegeben werden.", file=sys.stderr)
                 sys.exit(1)
-            _do_move_row(editor, args)
+            try:
+                _do_move_row(editor, args)
+            except ValueError as e:
+                sys.stdout.flush()
+                print(f"[FEHLER] {e}", file=sys.stderr)
+                sys.exit(1)
         else:
             # Nur anzeigen wenn keine Aktion angegeben
             print_rows(editor, args.rows)
@@ -580,23 +590,18 @@ def _do_move_row(editor: ExcelEditor, args) -> None:
     source_no = args.move_from
     after_no  = args.move_after
 
-    # Source-Zeile prüfen
-    try:
-        source_idx = editor._find_row_by_no(source_no)
-        after_idx  = editor._find_row_by_no(after_no)
-    except ValueError as e:
-        print(f"[FEHLER] {e}", file=sys.stderr)
-        sys.exit(1)
-
+    # Source-Zeile prüfen – ValueError wird an den Aufrufer weitergegeben
+    source_idx = editor._find_row_by_no(source_no)
     print(f"\nVerschiebe No={source_no!r} (Excel-Zeile {source_idx})")
-    print(f"  einfügen nach No={after_no!r} (Excel-Zeile {after_idx})")
+
+    try:
+        after_idx = editor._find_row_by_no(after_no)
+        print(f"  einfügen nach No={after_no!r} (Excel-Zeile {after_idx})")
+    except ValueError:
+        print(f"  einfügen nach No={after_no!r} (nicht gefunden – wird direkt als neues No vergeben)")
 
     # Verschieben
-    try:
-        new_no = editor.move_row_after(source_no, after_no)
-    except ValueError as e:
-        print(f"[FEHLER] {e}", file=sys.stderr)
-        sys.exit(1)
+    new_no = editor.move_row_after(source_no, after_no)
 
     print(f"  [OK] Verschoben. Neues No={new_no}")
 

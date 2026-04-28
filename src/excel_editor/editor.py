@@ -375,15 +375,52 @@ class ExcelEditor:
             cell.alignment = cell_data["alignment"]
             cell.number_format = cell_data["number_format"]
 
+    def _find_insert_position_for_no(self, target_no: Any) -> int:
+        """
+        Gibt den Zeilenindex der letzten Zeile zurück, deren No-Wert < target_no ist.
+        Wird verwendet, wenn after_no im Sheet nicht existiert.
+        Gibt den Index der letzten Datenzeile zurück, wenn alle No-Werte >= target_no.
+        """
+        from openpyxl.cell.cell import MergedCell
+
+        try:
+            target_int = int(target_no)
+        except (ValueError, TypeError):
+            raise ValueError(f"No='{target_no}' ist kein ganzzahliger Wert.")
+
+        no_col = self._find_no_column()
+        ws = self._worksheet
+        min_row = self.config.header_row + 1
+
+        last_smaller_idx: Optional[int] = None
+        last_data_idx: int = min_row
+
+        for row in ws.iter_rows(min_row=min_row):
+            cell = row[no_col - 1]
+            if isinstance(cell, MergedCell) or cell.value is None:
+                continue
+            last_data_idx = row[0].row
+            try:
+                no_int = int(cell.value)
+            except (ValueError, TypeError):
+                continue
+            if no_int < target_int:
+                last_smaller_idx = row[0].row
+
+        return last_smaller_idx if last_smaller_idx is not None else last_data_idx
+
     def move_row_after(self, source_no: Any, after_no: Any) -> int:
         """
         Verschiebt die Zeile mit No=source_no direkt NACH die Zeile mit No=after_no.
 
-        new_no = int((after_no + next_below_no) / 2)
+        Existiert after_no im Sheet:
+            new_no = int((after_no + next_below_no) / 2)
+        Existiert after_no NICHT:
+            Zeile wird an der passenden Stelle eingefügt und erhält new_no = after_no.
 
         Bricht mit ValueError ab wenn:
-          - source_no oder after_no nicht existieren
-          - Kein ganzzahliger Mittelwert möglich
+          - source_no nicht existiert
+          - Kein ganzzahliger Mittelwert möglich (nur wenn after_no existiert)
           - Das berechnete new_no bereits als No existiert
           - after_no und source_no identisch sind
 
@@ -396,9 +433,17 @@ class ExcelEditor:
         ws = self._worksheet
 
         source_idx = self._find_row_by_no(source_no)
-        after_idx = self._find_row_by_no(after_no)
 
-        if source_idx == after_idx:
+        # after_no muss nicht existieren – dann direkt als neues No verwenden
+        try:
+            after_idx = self._find_row_by_no(after_no)
+            after_no_exists = True
+        except ValueError:
+            after_no_exists = False
+            after_idx = self._find_insert_position_for_no(after_no)
+
+        # "Identisch"-Fehler nur wenn after_no tatsächlich existiert
+        if after_no_exists and source_idx == after_idx:
             raise ValueError("Quell- und Zielzeile sind identisch.")
 
         try:
@@ -406,45 +451,49 @@ class ExcelEditor:
         except (ValueError, TypeError):
             raise ValueError(f"No='{after_no}' ist kein ganzzahliger Wert.")
 
-        # Nächste Zeile unter after_idx finden (source überspringen)
-        below_no_int: Optional[int] = None
-        for row in ws.iter_rows(min_row=after_idx + 1):
-            if row[0].row == source_idx:
-                continue
-            cell = row[no_col - 1]
-            if isinstance(cell, MergedCell) or cell.value is None:
-                continue
+        if after_no_exists:
+            # Nächste Zeile unter after_idx finden (source überspringen)
+            below_no_int: Optional[int] = None
+            for row in ws.iter_rows(min_row=after_idx + 1):
+                if row[0].row == source_idx:
+                    continue
+                cell = row[no_col - 1]
+                if isinstance(cell, MergedCell) or cell.value is None:
+                    continue
+                try:
+                    below_no_int = int(cell.value)
+                    break
+                except (ValueError, TypeError):
+                    continue
+
+            # Neues No berechnen
+            if below_no_int is None:
+                new_no = after_no_int + 10
+            else:
+                raw_mid = (after_no_int + below_no_int) / 2
+                new_no = int(raw_mid)
+                if new_no <= after_no_int:
+                    raise ValueError(
+                        f"Kein ganzzahliger Mittelwert möglich zwischen "
+                        f"No={after_no_int} und No={below_no_int} "
+                        f"(Mittelwert wäre {raw_mid}). "
+                        f"Bitte Nummernlücke vergrößern."
+                    )
+
+            # Prüfen ob new_no bereits existiert
             try:
-                below_no_int = int(cell.value)
-                break
-            except (ValueError, TypeError):
-                continue
-
-        # Neues No berechnen
-        if below_no_int is None:
-            new_no = after_no_int + 10
-        else:
-            raw_mid = (after_no_int + below_no_int) / 2
-            new_no = int(raw_mid)
-            if new_no <= after_no_int:
+                self._find_row_by_no(new_no)
                 raise ValueError(
-                    f"Kein ganzzahliger Mittelwert möglich zwischen "
-                    f"No={after_no_int} und No={below_no_int} "
-                    f"(Mittelwert wäre {raw_mid}). "
-                    f"Bitte Nummernlücke vergrößern."
+                    f"Berechnetes No={new_no} ist bereits vergeben. "
+                    f"Bitte Nummernlücke zwischen {after_no_int} und "
+                    f"{below_no_int} vergrößern."
                 )
-
-        # Prüfen ob new_no bereits existiert
-        try:
-            self._find_row_by_no(new_no)
-            raise ValueError(
-                f"Berechnetes No={new_no} ist bereits vergeben. "
-                f"Bitte Nummernlücke zwischen {after_no_int} und "
-                f"{below_no_int} vergrößern."
-            )
-        except ValueError as e:
-            if "bereits vergeben" in str(e):
-                raise
+            except ValueError as e:
+                if "bereits vergeben" in str(e):
+                    raise
+        else:
+            # after_no existiert nicht → direkt als neues No vergeben
+            new_no = after_no_int
 
         # Source-Zeile sichern und No-Wert überschreiben
         copied_cells = self._copy_row_data(source_idx)
@@ -456,7 +505,11 @@ class ExcelEditor:
                 break
 
         # Verschieben
-        if source_idx < after_idx:
+        if source_idx == after_idx:
+            # after_no nicht vorhanden und source steht bereits an der richtigen Position
+            # → nur No-Wert umbenennen, keine Zeile verschieben
+            self._paste_row_data(source_idx, copied_cells)
+        elif source_idx < after_idx:
             ws.delete_rows(source_idx)
             adjusted_after = after_idx - 1
             ws.insert_rows(adjusted_after + 1)
